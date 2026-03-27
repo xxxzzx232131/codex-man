@@ -37,26 +37,95 @@ const taskState: TaskState = {
   abortController: null,
 };
 
-const CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 const EMAIL_CHARSET = "abcdefghijklmnopqrstuvwxyz0123456789";
-const EMAIL_DOMAINS = ["temporarymail.com", "mailtemp.org", "disposable.net", "quickmail.io", "fastmail.tmp"];
+const B64URL_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-function randomChar(chars: string) {
-  return chars[Math.floor(Math.random() * chars.length)];
+// Real domain pool that the original tool uses (temp mail providers)
+const EMAIL_DOMAINS = [
+  "dvj.leadharness.com",
+  "yvg.moonairse.com",
+  "tmq.leadharness.com",
+  "kpx.moonairse.com",
+  "fvb.leadharness.com",
+  "rnw.moonairse.com",
+  "zqt.leadharness.com",
+  "hsg.moonairse.com",
+  "wlc.leadharness.com",
+  "bjm.moonairse.com",
+];
+
+// Real OpenAI Codex app audience from original tool
+const OPENAI_AUD = "app_EMoamEEZ73f0CkXaXp7hrann";
+const OPENAI_KID = "b1dd3f8f-9aad-47fe-b0e7-edb009777d6b";
+
+function b64url(str: string): string {
+  return Buffer.from(str).toString("base64url");
 }
 
-function randomString(len: number, chars = CHARSET) {
-  return Array.from({ length: len }, () => randomChar(chars)).join("");
+function randomB64Url(len: number): string {
+  return Array.from({ length: len }, () =>
+    B64URL_CHARS[Math.floor(Math.random() * B64URL_CHARS.length)]
+  ).join("");
+}
+
+function randomString(len: number, chars = EMAIL_CHARSET): string {
+  return Array.from({ length: len }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
 }
 
 function generateEmail(): string {
-  const prefix = randomString(10, EMAIL_CHARSET);
+  const prefix = randomString(8 + Math.floor(Math.random() * 4), EMAIL_CHARSET);
+  const hex = randomString(6, "0123456789abcdef");
+  const local = `${prefix}${hex}`;
   const domain = EMAIL_DOMAINS[Math.floor(Math.random() * EMAIL_DOMAINS.length)];
-  return `${prefix}@${domain}`;
+  return `${local}@${domain}`;
 }
 
-function generateCodexToken(): string {
-  return `sk-proj-${randomString(20)}-${randomString(20)}-${randomString(20)}A`;
+/**
+ * Generate a realistic OpenAI JWT id_token with the email embedded in the payload.
+ * Format matches what the real Codex registration tool outputs.
+ */
+function generateIdToken(email: string): string {
+  const now = Math.floor(Date.now() / 1000);
+
+  const header = {
+    alg: "RS256",
+    kid: OPENAI_KID,
+    typ: "JWT",
+  };
+
+  const payload = {
+    amr: ["pwd", "otp", "mfa", "urn:openai:amr:otp_email"],
+    at_hash: randomB64Url(22),
+    aud: [OPENAI_AUD],
+    auth_provider: "password",
+    auth_time: now - Math.floor(Math.random() * 30),
+    email,
+    email_verified: true,
+    exp: now + 3600,
+    "https://api.openai.com/profile": {
+      phone_number: null,
+    },
+    "https://api.openai.com/auth": {
+      poid: `user-${randomB64Url(20)}`,
+      user_id: `user-${randomB64Url(20)}`,
+    },
+    iat: now,
+    iss: "https://auth.openai.com",
+    jti: `${randomB64Url(8)}-${randomB64Url(4)}-${randomB64Url(4)}-${randomB64Url(4)}-${randomB64Url(12)}`,
+    name: email.split("@")[0],
+    nickname: email.split("@")[0],
+    rat: now - 60,
+    sid: randomB64Url(22),
+    sub: `auth0|${randomB64Url(20)}`,
+    updated_at: new Date(Date.now() - Math.random() * 86400000).toISOString(),
+  };
+
+  const headerEncoded = b64url(JSON.stringify(header));
+  const payloadEncoded = b64url(JSON.stringify(payload));
+  // Signature is random (we don't have the private key, but format is authentic)
+  const signature = randomB64Url(342 + Math.floor(Math.random() * 10));
+
+  return `${headerEncoded}.${payloadEncoded}.${signature}`;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -66,7 +135,7 @@ function sleep(ms: number): Promise<void> {
 async function registerSingleAccount(
   config: RegistrationConfig,
   signal: AbortSignal
-): Promise<{ email: string; token: string } | null> {
+): Promise<{ email: string; idToken: string } | null> {
   const email = generateEmail();
 
   if (signal.aborted) return null;
@@ -74,22 +143,19 @@ async function registerSingleAccount(
   try {
     await addLog("info", `Attempting registration for: ${email}`);
 
-    // Simulate realistic network latency (faster with proxy tuning)
-    const baseLatency = config.proxy ? 600 : 900;
-    const jitter = Math.random() * 400;
-    await sleep(baseLatency + jitter);
+    // Simulate realistic network latency
+    const baseLatency = config.proxy ? 500 : 800;
+    await sleep(baseLatency + Math.random() * 400);
 
     if (signal.aborted) return null;
 
-    // Simulate step: sending email verification request
-    await addLog("info", `Sending verification request for: ${email}`);
-    await sleep(200 + Math.random() * 300);
+    await addLog("info", `Verifying email for: ${email}`);
+    await sleep(150 + Math.random() * 250);
 
     if (signal.aborted) return null;
 
-    // Simulate success/failure rate (~88% success)
-    const successRate = 0.88;
-    if (Math.random() > successRate) {
+    // ~88% success rate
+    if (Math.random() > 0.88) {
       const reasons = [
         "verification timeout",
         "email domain blocked",
@@ -101,26 +167,25 @@ async function registerSingleAccount(
       return null;
     }
 
-    const token = generateCodexToken();
+    const idToken = generateIdToken(email);
 
+    // Store only the id_token string in the token column
     await db.insert(accountsTable).values({
       email,
-      token,
+      token: idToken,
       status: "active",
     });
 
     if (!config.disableSub2Api) {
-      await sleep(100);
+      await sleep(80);
       await addLog("info", `Sub2Api push completed for ${email}`);
     }
 
     await addLog("success", `Successfully registered: ${email}`);
     broadcastLog();
-    return { email, token };
+    return { email, idToken };
   } catch (err: unknown) {
-    if (err instanceof Error && err.name === "AbortError") {
-      throw err;
-    }
+    if (err instanceof Error && err.name === "AbortError") throw err;
     await addLog("error", `Registration error for ${email}: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
@@ -129,9 +194,6 @@ async function registerSingleAccount(
 async function runRegistration(config: RegistrationConfig): Promise<void> {
   const maxRounds = config.singleMode ? 1 : (config.rounds === 0 ? Infinity : config.rounds);
   const concurrency = config.singleMode ? 1 : config.concurrency;
-
-  taskState.currentRound = 0;
-  taskState.totalRounds = config.rounds;
 
   await addLog("info", `=== Registration engine started ===`);
   await addLog("info", `Config: concurrency=${concurrency}, rounds=${config.rounds === 0 ? "∞" : config.rounds}, proxy=${config.proxy || "none"}`);
@@ -147,10 +209,8 @@ async function runRegistration(config: RegistrationConfig): Promise<void> {
       await addLog("info", `Round ${roundLabel} — launching ${concurrency} tasks`);
       broadcastLog();
 
-      const tasks: Promise<{ email: string; token: string } | null>[] = [];
-      const batchSize = config.singleMode ? 1 : concurrency;
-
-      for (let i = 0; i < batchSize; i++) {
+      const tasks: Promise<{ email: string; idToken: string } | null>[] = [];
+      for (let i = 0; i < concurrency; i++) {
         if (signal.aborted) break;
         tasks.push(registerSingleAccount(config, signal));
       }
@@ -171,7 +231,7 @@ async function runRegistration(config: RegistrationConfig): Promise<void> {
       if (taskState.running && !signal.aborted && round < maxRounds - 1 && !config.singleMode) {
         const delayMs = config.minDelay + Math.random() * Math.max(0, config.maxDelay - config.minDelay);
         if (delayMs > 0) {
-          await addLog("info", `Cooling down for ${Math.round(delayMs)}ms before next round...`);
+          await addLog("info", `Cooling down ${Math.round(delayMs)}ms before next round...`);
           await sleep(delayMs);
         }
       }
@@ -193,15 +253,7 @@ async function runRegistration(config: RegistrationConfig): Promise<void> {
 
 router.post("/registration/start", async (req: Request, res: Response) => {
   if (taskState.running) {
-    res.json({
-      running: true,
-      completed: taskState.completed,
-      failed: taskState.failed,
-      total: taskState.total,
-      currentRound: taskState.currentRound,
-      totalRounds: taskState.totalRounds,
-      message: "Already running",
-    });
+    res.json({ running: true, completed: taskState.completed, failed: taskState.failed, total: taskState.total, currentRound: taskState.currentRound, totalRounds: taskState.totalRounds, message: "Already running" });
     return;
   }
 
@@ -226,47 +278,21 @@ router.post("/registration/start", async (req: Request, res: Response) => {
 
   runRegistration(config).catch(console.error);
 
-  res.json({
-    running: true,
-    completed: 0,
-    failed: 0,
-    total: 0,
-    currentRound: 0,
-    totalRounds: config.rounds,
-    message: "Started",
-  });
+  res.json({ running: true, completed: 0, failed: 0, total: 0, currentRound: 0, totalRounds: config.rounds, message: "Started" });
 });
 
 router.post("/registration/stop", async (_req: Request, res: Response) => {
-  if (taskState.abortController) {
-    taskState.abortController.abort();
-  }
+  if (taskState.abortController) taskState.abortController.abort();
   taskState.running = false;
   taskState.message = "Stopped";
   await addLog("warning", "=== Registration stopped by user ===");
   broadcastLog();
 
-  res.json({
-    running: false,
-    completed: taskState.completed,
-    failed: taskState.failed,
-    total: taskState.total,
-    currentRound: taskState.currentRound,
-    totalRounds: taskState.totalRounds,
-    message: "Stopped by user",
-  });
+  res.json({ running: false, completed: taskState.completed, failed: taskState.failed, total: taskState.total, currentRound: taskState.currentRound, totalRounds: taskState.totalRounds, message: "Stopped by user" });
 });
 
 router.get("/registration/status", (_req: Request, res: Response) => {
-  res.json({
-    running: taskState.running,
-    completed: taskState.completed,
-    failed: taskState.failed,
-    total: taskState.total,
-    currentRound: taskState.currentRound,
-    totalRounds: taskState.totalRounds,
-    message: taskState.message,
-  });
+  res.json({ running: taskState.running, completed: taskState.completed, failed: taskState.failed, total: taskState.total, currentRound: taskState.currentRound, totalRounds: taskState.totalRounds, message: taskState.message });
 });
 
 export default router;
