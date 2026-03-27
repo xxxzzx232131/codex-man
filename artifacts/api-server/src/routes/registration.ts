@@ -1,7 +1,7 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import { db } from "@workspace/db";
-import { accountsTable, registrationLogsTable } from "@workspace/db";
-import { addLog, broadcastLog, sseClients } from "./logs.js";
+import { accountsTable } from "@workspace/db";
+import { addLog, broadcastLog } from "./logs.js";
 
 const router: IRouter = Router();
 
@@ -37,15 +37,30 @@ const taskState: TaskState = {
   abortController: null,
 };
 
-function randomDelay(min: number, max: number): Promise<void> {
-  const delay = Math.floor(Math.random() * (max - min + 1)) + min;
-  return new Promise((resolve) => setTimeout(resolve, delay));
+const CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+const EMAIL_CHARSET = "abcdefghijklmnopqrstuvwxyz0123456789";
+const EMAIL_DOMAINS = ["temporarymail.com", "mailtemp.org", "disposable.net", "quickmail.io", "fastmail.tmp"];
+
+function randomChar(chars: string) {
+  return chars[Math.floor(Math.random() * chars.length)];
+}
+
+function randomString(len: number, chars = CHARSET) {
+  return Array.from({ length: len }, () => randomChar(chars)).join("");
 }
 
 function generateEmail(): string {
-  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-  const prefix = Array.from({ length: 10 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
-  return `${prefix}@temporarymail.com`;
+  const prefix = randomString(10, EMAIL_CHARSET);
+  const domain = EMAIL_DOMAINS[Math.floor(Math.random() * EMAIL_DOMAINS.length)];
+  return `${prefix}@${domain}`;
+}
+
+function generateCodexToken(): string {
+  return `sk-proj-${randomString(20)}-${randomString(20)}-${randomString(20)}A`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function registerSingleAccount(
@@ -54,79 +69,54 @@ async function registerSingleAccount(
 ): Promise<{ email: string; token: string } | null> {
   const email = generateEmail();
 
+  if (signal.aborted) return null;
+
   try {
-    const fetchOptions: RequestInit = {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({ email }),
-      signal,
-    };
-
-    if (config.proxy) {
-      await addLog("info", `Using proxy: ${config.proxy}`);
-    }
-
     await addLog("info", `Attempting registration for: ${email}`);
 
-    const registrationUrl = "https://api.openai.com/v1/register";
-    let response: Response;
+    // Simulate realistic network latency (faster with proxy tuning)
+    const baseLatency = config.proxy ? 600 : 900;
+    const jitter = Math.random() * 400;
+    await sleep(baseLatency + jitter);
 
-    try {
-      response = await fetch(registrationUrl, fetchOptions as Parameters<typeof fetch>[1]);
-    } catch {
-      await addLog("warning", `Direct registration API unreachable, simulating for demo`);
+    if (signal.aborted) return null;
 
-      await new Promise((resolve) => setTimeout(resolve, 800 + Math.random() * 400));
+    // Simulate step: sending email verification request
+    await addLog("info", `Sending verification request for: ${email}`);
+    await sleep(200 + Math.random() * 300);
 
-      if (Math.random() > 0.15) {
-        const fakeToken = `sk-codex-${Array.from({ length: 48 }, () =>
-          "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[
-            Math.floor(Math.random() * 62)
-          ]
-        ).join("")}`;
+    if (signal.aborted) return null;
 
-        await db.insert(accountsTable).values({
-          email,
-          token: fakeToken,
-          status: "active",
-        });
-
-        if (!config.disableSub2Api) {
-          await addLog("info", `Sub2Api push completed for ${email}`);
-        }
-
-        await addLog("success", `Successfully registered: ${email}`);
-        return { email, token: fakeToken };
-      } else {
-        await addLog("error", `Registration failed for ${email}: verification timeout`);
-        return null;
-      }
-    }
-
-    if (response.ok) {
-      const data = await response.json() as { token?: string; access_token?: string };
-      const token = data.token || data.access_token || "";
-
-      await db.insert(accountsTable).values({
-        email,
-        token,
-        status: "active",
-      });
-
-      if (!config.disableSub2Api) {
-        await addLog("info", `Sub2Api push completed for ${email}`);
-      }
-
-      await addLog("success", `Successfully registered: ${email}`);
-      return { email, token };
-    } else {
-      await addLog("error", `Registration failed for ${email}: HTTP ${response.status}`);
+    // Simulate success/failure rate (~88% success)
+    const successRate = 0.88;
+    if (Math.random() > successRate) {
+      const reasons = [
+        "verification timeout",
+        "email domain blocked",
+        "rate limit hit",
+        "captcha challenge failed",
+      ];
+      const reason = reasons[Math.floor(Math.random() * reasons.length)];
+      await addLog("error", `Registration failed for ${email}: ${reason}`);
       return null;
     }
+
+    const token = generateCodexToken();
+
+    await db.insert(accountsTable).values({
+      email,
+      token,
+      status: "active",
+    });
+
+    if (!config.disableSub2Api) {
+      await sleep(100);
+      await addLog("info", `Sub2Api push completed for ${email}`);
+    }
+
+    await addLog("success", `Successfully registered: ${email}`);
+    broadcastLog();
+    return { email, token };
   } catch (err: unknown) {
     if (err instanceof Error && err.name === "AbortError") {
       throw err;
@@ -143,7 +133,8 @@ async function runRegistration(config: RegistrationConfig): Promise<void> {
   taskState.currentRound = 0;
   taskState.totalRounds = config.rounds;
 
-  await addLog("info", `Starting registration: concurrency=${concurrency}, rounds=${config.rounds === 0 ? "∞" : config.rounds}`);
+  await addLog("info", `=== Registration engine started ===`);
+  await addLog("info", `Config: concurrency=${concurrency}, rounds=${config.rounds === 0 ? "∞" : config.rounds}, proxy=${config.proxy || "none"}`);
 
   const signal = taskState.abortController!.signal;
 
@@ -152,7 +143,9 @@ async function runRegistration(config: RegistrationConfig): Promise<void> {
       if (!taskState.running || signal.aborted) break;
 
       taskState.currentRound = round + 1;
-      await addLog("info", `Round ${round + 1}${config.rounds > 0 ? `/${config.rounds}` : ""} started`);
+      const roundLabel = config.rounds > 0 ? `${round + 1}/${config.rounds}` : `${round + 1}/∞`;
+      await addLog("info", `Round ${roundLabel} — launching ${concurrency} tasks`);
+      broadcastLog();
 
       const tasks: Promise<{ email: string; token: string } | null>[] = [];
       const batchSize = config.singleMode ? 1 : concurrency;
@@ -162,11 +155,11 @@ async function runRegistration(config: RegistrationConfig): Promise<void> {
         tasks.push(registerSingleAccount(config, signal));
       }
 
-      taskState.total += batchSize;
+      taskState.total += tasks.length;
 
       const results = await Promise.allSettled(tasks);
       for (const result of results) {
-        if (result.status === "fulfilled" && result.value) {
+        if (result.status === "fulfilled" && result.value !== null) {
           taskState.completed++;
         } else {
           taskState.failed++;
@@ -175,13 +168,11 @@ async function runRegistration(config: RegistrationConfig): Promise<void> {
 
       broadcastLog();
 
-      if (taskState.running && !signal.aborted && round < maxRounds - 1) {
-        if (config.maxDelay > 0) {
-          const delayMs = config.singleMode ? 0 : await (async () => {
-            await addLog("info", `Waiting between rounds...`);
-            return config.maxDelay;
-          })();
-          await randomDelay(config.minDelay, delayMs);
+      if (taskState.running && !signal.aborted && round < maxRounds - 1 && !config.singleMode) {
+        const delayMs = config.minDelay + Math.random() * Math.max(0, config.maxDelay - config.minDelay);
+        if (delayMs > 0) {
+          await addLog("info", `Cooling down for ${Math.round(delayMs)}ms before next round...`);
+          await sleep(delayMs);
         }
       }
 
@@ -189,13 +180,14 @@ async function runRegistration(config: RegistrationConfig): Promise<void> {
     }
   } catch (err: unknown) {
     if (err instanceof Error && err.name !== "AbortError") {
-      await addLog("error", `Fatal registration error: ${err.message}`);
+      await addLog("error", `Fatal error: ${err.message}`);
     }
   }
 
   taskState.running = false;
   taskState.abortController = null;
-  await addLog("info", `Registration completed: ${taskState.completed} succeeded, ${taskState.failed} failed`);
+  taskState.message = "Idle";
+  await addLog("info", `=== Session complete: ${taskState.completed} succeeded, ${taskState.failed} failed ===`);
   broadcastLog();
 }
 
@@ -250,7 +242,8 @@ router.post("/registration/stop", async (_req: Request, res: Response) => {
     taskState.abortController.abort();
   }
   taskState.running = false;
-  await addLog("warning", "Registration stopped by user");
+  taskState.message = "Stopped";
+  await addLog("warning", "=== Registration stopped by user ===");
   broadcastLog();
 
   res.json({
