@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { Terminal, Trash2 } from "lucide-react";
-import { format } from "date-fns";
+import { format, isValid } from "date-fns";
 import { useLiveLogs } from "@/hooks/use-live-logs";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -72,7 +72,7 @@ export function LogsTerminal() {
             {logs.map((log, i) => (
               <div key={`${log.id}-${i}`} className="flex gap-3 hover:bg-white/[0.02] px-1 rounded transition-colors break-words">
                 <span className="text-muted-foreground/50 shrink-0 select-none">
-                  {format(new Date(log.timestamp), 'HH:mm:ss.SSS')}
+                  {(() => { const d = new Date(log.timestamp); return isValid(d) ? format(d, 'HH:mm:ss.SSS') : '--:--:--.---'; })()}
                 </span>
                 <span className={`font-semibold shrink-0 uppercase w-16 ${getLogColor(log.level)}`}>
                   [{log.level}]
