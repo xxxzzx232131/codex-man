@@ -1,15 +1,22 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Codex Man - OpenAI Account Registration Manager API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: auth
+    description: Authentication
+  - name: registration
+    description: Account registration management
+  - name: accounts
+    description: Registered accounts management
+  - name: logs
+    description: Real-time logs via SSE
 paths:
   /healthz:
     get:
@@ -24,6 +31,142 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /auth/verify:
+    post:
+      operationId: verifyPassword
+      tags: [auth]
+      summary: Verify admin password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthRequest"
+      responses:
+        "200":
+          description: Authentication result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+
+  /registration/start:
+    post:
+      operationId: startRegistration
+      tags: [registration]
+      summary: Start batch registration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegistrationConfig"
+      responses:
+        "200":
+          description: Registration task started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskStatus"
+
+  /registration/stop:
+    post:
+      operationId: stopRegistration
+      tags: [registration]
+      summary: Stop ongoing registration
+      responses:
+        "200":
+          description: Registration stopped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskStatus"
+
+  /registration/status:
+    get:
+      operationId: getRegistrationStatus
+      tags: [registration]
+      summary: Get current registration status
+      responses:
+        "200":
+          description: Current task status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskStatus"
+
+  /accounts:
+    get:
+      operationId: getAccounts
+      tags: [accounts]
+      summary: Get all registered accounts
+      responses:
+        "200":
+          description: List of accounts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountList"
+
+  /accounts/export/csv:
+    get:
+      operationId: exportAccountsCsv
+      tags: [accounts]
+      summary: Export accounts as CSV
+      responses:
+        "200":
+          description: CSV file
+          content:
+            text/csv:
+              schema:
+                type: string
+
+  /accounts/export/json:
+    get:
+      operationId: exportAccountsJson
+      tags: [accounts]
+      summary: Export accounts as JSON
+      responses:
+        "200":
+          description: JSON file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountList"
+
+  /accounts/{id}:
+    delete:
+      operationId: deleteAccount
+      tags: [accounts]
+      summary: Delete a registered account
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Account deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteResult"
+
+  /logs:
+    get:
+      operationId: getLogs
+      tags: [logs]
+      summary: Get recent log entries
+      responses:
+        "200":
+          description: Log entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogList"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +177,154 @@ components:
       required:
         - status
 
+    AuthRequest:
+      type: object
+      properties:
+        password:
+          type: string
+      required:
+        - password
+
+    AuthResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+      required:
+        - success
+        - message
+
+    RegistrationConfig:
+      type: object
+      properties:
+        proxy:
+          type: string
+          description: Proxy address (e.g. http://host:port or socks5://host:port)
+        concurrency:
+          type: integer
+          minimum: 1
+          maximum: 50
+          description: Number of concurrent registration tasks
+        rounds:
+          type: integer
+          minimum: 0
+          description: Number of rounds (0 = unlimited)
+        minDelay:
+          type: integer
+          minimum: 0
+          description: Minimum delay between rounds in ms
+        maxDelay:
+          type: integer
+          minimum: 0
+          description: Maximum delay between rounds in ms
+        singleMode:
+          type: boolean
+          description: Register only one account
+        disableSub2Api:
+          type: boolean
+          description: Disable Sub2Api push logic
+      required:
+        - concurrency
+        - rounds
+        - minDelay
+        - maxDelay
+
+    TaskStatus:
+      type: object
+      properties:
+        running:
+          type: boolean
+        completed:
+          type: integer
+        failed:
+          type: integer
+        total:
+          type: integer
+        currentRound:
+          type: integer
+        totalRounds:
+          type: integer
+        message:
+          type: string
+      required:
+        - running
+        - completed
+        - failed
+        - total
+
+    Account:
+      type: object
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+        token:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [active, failed, unknown]
+      required:
+        - id
+        - email
+        - token
+        - createdAt
+        - status
+
+    AccountList:
+      type: object
+      properties:
+        accounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/Account"
+        total:
+          type: integer
+      required:
+        - accounts
+        - total
+
+    DeleteResult:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+      required:
+        - success
+        - message
+
+    LogEntry:
+      type: object
+      properties:
+        id:
+          type: integer
+        level:
+          type: string
+          enum: [info, success, error, warning]
+        message:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+      required:
+        - id
+        - level
+        - message
+        - timestamp
+
+    LogList:
+      type: object
+      properties:
+        logs:
+          type: array
+          items:
+            $ref: "#/components/schemas/LogEntry"
+      required:
+        - logs

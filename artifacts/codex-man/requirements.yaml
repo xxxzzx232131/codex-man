@@ -1,0 +1,17 @@
+packages:
+  "framer-motion": "For fluid UI animations, page transitions, and the terminal log effects"
+  "zustand": "For simple global authentication state management"
+  "date-fns": "For formatting timestamps in logs and account creation dates"
+  "react-hook-form": "For robust configuration form management"
+  "@hookform/resolvers": "For Zod validation integration with react-hook-form"
+  "zod": "For configuration form schema validation"
+
+images:
+  - path: "artifacts/codex-man/public/images/login-bg.png"
+    description: "Dark, abstract tech dashboard background with subtle glowing neon green geometric lines and data node particles, very professional, out of focus"
+    aspect_ratio: "16:9"
+
+notes:
+  - Assumes Shadcn UI components are standard implementations
+  - Using Zustand for auth state persisted in localStorage
+  - SSE endpoint for logs is assumed to emit standard EventSource events with JSON data
