@@ -2,7 +2,7 @@ import { useState } from "react";
 import { format, isValid } from "date-fns";
 import { useGetAccounts, useDeleteAccount } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Download, FileText, RefreshCw, Trash2, Shield, Eye, EyeOff, PackageOpen } from "lucide-react";
+import { Download, FileText, RefreshCw, Trash2, Shield, Eye, EyeOff, FolderOpen, AlertTriangle } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -19,8 +19,8 @@ function emailToFilename(email: string): string {
   return `token_${local}_${domain}.json`;
 }
 
-function triggerDownload(filename: string, content: string, mime = "application/json") {
-  const blob = new Blob([content], { type: mime });
+function triggerDownload(filename: string, content: string) {
+  const blob = new Blob([content], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -31,11 +31,30 @@ function triggerDownload(filename: string, content: string, mime = "application/
   URL.revokeObjectURL(url);
 }
 
+// File System Access API type augmentation
+interface FileSystemDirectoryHandle {
+  getFileHandle(name: string, options?: { create?: boolean }): Promise<FileSystemFileHandle>;
+}
+interface FileSystemFileHandle {
+  createWritable(): Promise<FileSystemWritableFileStream>;
+}
+interface FileSystemWritableFileStream {
+  write(data: string | ArrayBuffer | Blob): Promise<void>;
+  close(): Promise<void>;
+}
+declare global {
+  interface Window {
+    showDirectoryPicker?: (opts?: { mode?: string }) => Promise<FileSystemDirectoryHandle>;
+  }
+}
+
 export function AccountsTable() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [showTokens, setShowTokens] = useState<Record<number, boolean>>({});
   const [downloading, setDownloading] = useState<Record<number, boolean>>({});
+  const [exporting, setExporting] = useState(false);
+  const [clearing, setClearing] = useState(false);
 
   const { data, isLoading, refetch } = useGetAccounts();
   const accounts = data?.accounts || [];
@@ -50,12 +69,92 @@ export function AccountsTable() {
     },
   });
 
-  /** Download a single account as token_email@domain.json */
+  /** Clear all accounts from DB */
+  const handleClearAll = async () => {
+    if (!confirm(`Delete all ${accounts.length} accounts? This cannot be undone.`)) return;
+    setClearing(true);
+    try {
+      const res = await fetch("/api/accounts", { method: "DELETE" });
+      if (!res.ok) throw new Error();
+      toast({ title: `Cleared ${accounts.length} accounts` });
+      queryClient.invalidateQueries({ queryKey: ["/api/accounts"] });
+    } catch {
+      toast({ title: "Clear failed", variant: "destructive" });
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  /**
+   * Export all accounts as individual files saved directly to a user-chosen directory.
+   * Uses File System Access API (showDirectoryPicker) when available.
+   * Falls back to sequential browser downloads on unsupported browsers.
+   */
+  const handleExportToFolder = async () => {
+    if (accounts.length === 0) {
+      toast({ title: "No accounts to export", variant: "destructive" });
+      return;
+    }
+
+    // Fetch all token data first
+    setExporting(true);
+    let files: { filename: string; id_token: string }[] = [];
+    try {
+      const res = await fetch("/api/accounts/export/json");
+      if (!res.ok) throw new Error();
+      const json = await res.json() as { files: { filename: string; id_token: string }[] };
+      files = json.files;
+    } catch {
+      toast({ title: "Failed to fetch export data", variant: "destructive" });
+      setExporting(false);
+      return;
+    }
+
+    // Try File System Access API first (Chrome/Edge)
+    if (typeof window.showDirectoryPicker === "function") {
+      try {
+        const dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+        let written = 0;
+        for (const file of files) {
+          const content = JSON.stringify({ id_token: file.id_token }, null, 2);
+          const fileHandle = await dirHandle.getFileHandle(file.filename, { create: true });
+          const writable = await fileHandle.createWritable();
+          await writable.write(content);
+          await writable.close();
+          written++;
+        }
+        toast({ title: `Saved ${written} files to selected folder` });
+        setExporting(false);
+        return;
+      } catch (err) {
+        // User cancelled the picker — don't fall through to download
+        if (err instanceof Error && err.name === "AbortError") {
+          setExporting(false);
+          return;
+        }
+        // Any other error → fall through to download fallback
+      }
+    }
+
+    // Fallback: staggered individual downloads
+    for (let i = 0; i < files.length; i++) {
+      await new Promise<void>((resolve) => {
+        setTimeout(() => {
+          triggerDownload(files[i].filename, JSON.stringify({ id_token: files[i].id_token }, null, 2));
+          resolve();
+        }, i * 300);
+      });
+    }
+    toast({ title: `Downloaded ${files.length} token files` });
+    setExporting(false);
+  };
+
+  /** Download a single account's token file */
   const handleDownloadOne = async (id: number, email: string) => {
     setDownloading((p) => ({ ...p, [id]: true }));
     try {
       const res = await fetch(`/api/accounts/${id}/token`);
-      if (!res.ok) throw new Error("Download failed");
+      if (!res.ok) throw new Error();
       const text = await res.text();
       triggerDownload(emailToFilename(email), text);
     } catch {
@@ -65,45 +164,13 @@ export function AccountsTable() {
     }
   };
 
-  /** Download all accounts — one separate file per account, staggered */
-  const handleExportAllJson = async () => {
-    try {
-      const res = await fetch("/api/accounts/export/json");
-      if (!res.ok) throw new Error("Export failed");
-      const data = await res.json() as {
-        files: { filename: string; id_token: string }[];
-        total: number;
-      };
-
-      if (data.files.length === 0) {
-        toast({ title: "No accounts to export", variant: "destructive" });
-        return;
-      }
-
-      // Trigger one download per account with a small delay to avoid browser blocking
-      for (let i = 0; i < data.files.length; i++) {
-        const file = data.files[i];
-        await new Promise<void>((resolve) => {
-          setTimeout(() => {
-            triggerDownload(file.filename, JSON.stringify({ id_token: file.id_token }, null, 2));
-            resolve();
-          }, i * 200);
-        });
-      }
-
-      toast({ title: `Downloaded ${data.files.length} token files` });
-    } catch {
-      toast({ title: "Export failed", variant: "destructive" });
-    }
-  };
-
-  /** Export as CSV */
+  /** Export CSV */
   const handleExportCSV = async () => {
     try {
       const res = await fetch("/api/accounts/export/csv");
       if (!res.ok) throw new Error();
       const text = await res.text();
-      triggerDownload("codex_accounts.csv", text, "text/csv");
+      triggerDownload("codex_accounts.csv", text);
     } catch {
       toast({ title: "CSV export failed", variant: "destructive" });
     }
@@ -122,22 +189,43 @@ export function AccountsTable() {
               Registered Accounts
             </CardTitle>
             <CardDescription>
-              {accounts.length} account{accounts.length !== 1 ? "s" : ""} — each exports as its own{" "}
-              <code className="text-xs">token_email_domain.json</code>
+              {accounts.length} account{accounts.length !== 1 ? "s" : ""} — exports save as individual{" "}
+              <code className="text-xs">token_email_domain.json</code> files
             </CardDescription>
           </div>
+
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="outline" size="sm" onClick={() => refetch()}>
               <RefreshCw className={`h-4 w-4 mr-2 ${isLoading ? "animate-spin" : ""}`} />
               Refresh
             </Button>
-            <Button variant="secondary" size="sm" onClick={handleExportCSV}>
+
+            {/* Export to folder — primary export action */}
+            <Button
+              variant="default"
+              size="sm"
+              onClick={handleExportToFolder}
+              disabled={exporting || accounts.length === 0}
+              className="bg-primary text-primary-foreground hover:bg-primary/90"
+            >
+              <FolderOpen className={`h-4 w-4 mr-2 ${exporting ? "animate-pulse" : ""}`} />
+              {exporting ? "Saving…" : "Export to Folder"}
+            </Button>
+
+            <Button variant="secondary" size="sm" onClick={handleExportCSV} disabled={accounts.length === 0}>
               <FileText className="h-4 w-4 mr-2" />
               CSV
             </Button>
-            <Button variant="secondary" size="sm" onClick={handleExportAllJson}>
-              <PackageOpen className="h-4 w-4 mr-2" />
-              Export All JSON
+
+            {/* Clear all */}
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={handleClearAll}
+              disabled={clearing || accounts.length === 0}
+            >
+              <AlertTriangle className="h-4 w-4 mr-2" />
+              {clearing ? "Clearing…" : "Clear All"}
             </Button>
           </div>
         </div>
@@ -195,9 +283,7 @@ export function AccountsTable() {
                         className={
                           acc.status === "active"
                             ? "border-primary/50 text-primary bg-primary/10"
-                            : acc.status === "failed"
-                            ? "border-destructive/50 text-destructive bg-destructive/10"
-                            : "text-muted-foreground"
+                            : "border-destructive/50 text-destructive bg-destructive/10"
                         }
                       >
                         {acc.status}
@@ -208,7 +294,6 @@ export function AccountsTable() {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                        {/* Download individual token file */}
                         <Button
                           variant="ghost"
                           size="icon"
@@ -219,7 +304,6 @@ export function AccountsTable() {
                         >
                           <Download className="h-4 w-4" />
                         </Button>
-                        {/* Delete */}
                         <Button
                           variant="ghost"
                           size="icon"

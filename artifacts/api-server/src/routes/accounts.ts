@@ -11,6 +11,16 @@ function emailToFilename(email: string): string {
   return `token_${local}_${domain}.json`;
 }
 
+/** Delete ALL accounts at once */
+router.delete("/accounts", async (_req: Request, res: Response) => {
+  try {
+    await db.delete(accountsTable);
+    res.json({ success: true, message: "All accounts cleared" });
+  } catch {
+    res.status(500).json({ success: false, message: "Clear failed" });
+  }
+});
+
 router.get("/accounts", async (_req: Request, res: Response) => {
   try {
     const accounts = await db.select().from(accountsTable).orderBy(desc(accountsTable.createdAt));
